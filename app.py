@@ -1,266 +1,447 @@
-import os
-import sys
-import uuid
-import time
-from flask import Flask, request, jsonify, send_file, render_template_string
+"""
+المركز السيادي - ديوان محافظة عدن
+نظام متكامل لإدارة الإيرادات والرقابة الميدانية
 
-# ============================
-# محاولة استيراد المكتبات مع التعامل مع الأخطاء
-# ============================
-try:
-    from moviepy import VideoClip, AudioFileClip, CompositeVideoClip, TextClip, ColorClip
-    from moviepy.video.fx import Resize
-except ImportError:
-    print("ERROR: moviepy not installed")
-    sys.exit(1)
-
-try:
-    from gtts import gTTS
-except ImportError:
-    print("ERROR: gTTS not installed")
-    sys.exit(1)
-
-try:
-    from PIL import Image, ImageDraw, ImageFont
-except ImportError:
-    print("ERROR: Pillow not installed")
-    sys.exit(1)
-
-# ElevenLabs اختياري
-try:
-    from elevenlabs import generate, set_api_key, Voice, VoiceSettings
-    ELEVENLABS_AVAILABLE = True
-except ImportError:
-    ELEVENLABS_AVAILABLE = False
-    print("Note: elevenlabs not installed (optional)")
-
-# ============================
-# إعداد Flask والمجلدات
-# ============================
-app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key'
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-STATIC_DIR = os.path.join(BASE_DIR, 'static')
-OUTPUT_DIR = os.path.join(STATIC_DIR, 'output')
-AVATARS_DIR = os.path.join(STATIC_DIR, 'avatars')
-os.makedirs(OUTPUT_DIR, exist_ok=True)
-os.makedirs(AVATARS_DIR, exist_ok=True)
-
-# صورة رمزية افتراضية
-def create_default_avatar():
-    path = os.path.join(AVATARS_DIR, 'default.png')
-    if not os.path.exists(path):
-        img = Image.new('RGB', (400,400), (73,109,137))
-        d = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.truetype("arial.ttf", 40)
-        except:
-            font = ImageFont.load_default()
-        d.text((100,180), "AI Avatar", fill=(255,255,255), font=font)
-        img.save(path)
-    return path
-
-DEFAULT_AVATAR = create_default_avatar()
-
-# دوال إنشاء الفيديو (نفس الكود السابق مع تحسينات بسيطة)
-def generate_audio(text, out_path, use_elevenlabs=False, api_key=None):
-    if use_elevenlabs and api_key and ELEVENLABS_AVAILABLE:
-        try:
-            set_api_key(api_key)
-            audio = generate(text=text, voice=Voice(voice_id='EXAVITQu4vrTQcpA88OZ',
-                          settings=VoiceSettings(stability=0.35, similarity_boost=0.75)))
-            with open(out_path, 'wb') as f:
-                f.write(audio)
-            return out_path
-        except:
-            pass
-    tts = gTTS(text=text, lang='ar')
-    tts.save(out_path)
-    return out_path
-
-def create_video_simple(text, out_path, duration=5, avatar=None, bg='black', txt_color='white'):
-    w, h = 640, 480
-    avatar_path = avatar if (avatar and os.path.exists(avatar)) else DEFAULT_AVATAR
-    bg_clip = ColorClip(size=(w,h), color=bg, duration=duration)
-    txt_clip = TextClip(font="Arial", text=text, font_size=30, color=txt_color,
-                        bg_color='rgba(0,0,0,0.6)', size=(w-100, None),
-                        method='caption', text_align='center'
-                       ).with_position(('center', h-150)).with_duration(duration)
-    clips = [bg_clip, txt_clip]
-    if avatar_path:
-        try:
-            av_clip = VideoClip.from_image(avatar_path, duration=duration).resized(height=150)
-            av_clip = av_clip.with_position(('center', 50))
-            clips.append(av_clip)
-        except:
-            pass
-    final = CompositeVideoClip(clips)
-    final.write_videofile(out_path, fps=24, codec='libx264', audio_codec='aac')
-    return out_path
-
-def create_video_synced(text, audio_path, out_path, avatar=None, bg='black', txt_color='white'):
-    w, h = 640, 480
-    audio_clip = AudioFileClip(audio_path)
-    duration = audio_clip.duration
-    avatar_path = avatar if (avatar and os.path.exists(avatar)) else DEFAULT_AVATAR
-    bg_clip = ColorClip(size=(w,h), color=bg, duration=duration)
-    words = text.split()
-    seg = duration / len(words) if words else duration
-    txt_clips = []
-    for i, word in enumerate(words):
-        clip = TextClip(font="Arial", text=word, font_size=30, color=txt_color,
-                        bg_color='rgba(0,0,0,0.6)', size=(w-100, None), method='caption'
-                       ).with_position(('center', h-150)).with_start(i*seg).with_duration(seg)
-        txt_clips.append(clip)
-    clips = [bg_clip] + txt_clips
-    if avatar_path:
-        try:
-            av_clip = VideoClip.from_image(avatar_path, duration=duration).resized(height=150)
-            av_clip = av_clip.with_position(('center', 50))
-            clips.append(av_clip)
-        except:
-            pass
-    final = CompositeVideoClip(clips).with_audio(audio_clip)
-    final.write_videofile(out_path, fps=24, codec='libx264', audio_codec='aac')
-    return out_path
-
-# ============================
-# واجهة HTML مضمنة (مختصرة لكنها كاملة)
-# ============================
-HTML = """
-<!DOCTYPE html>
-<html dir="rtl" lang="ar">
-<head><meta charset="UTF-8"><title>توليد فيديو من النص</title>
-<style>
-body{font-family:Tahoma;background:linear-gradient(135deg,#667eea,#764ba2);padding:20px;}
-.container{max-width:800px;margin:auto;background:#fff;border-radius:20px;overflow:hidden;}
-.header{background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;padding:30px;text-align:center;}
-.content{padding:30px;}
-.form-group{margin-bottom:20px;}
-label{display:block;font-weight:bold;margin-bottom:8px;}
-textarea,select,input{width:100%;padding:12px;border:2px solid #e0e0e0;border-radius:10px;}
-.row{display:grid;grid-template-columns:1fr 1fr;gap:15px;}
-button{width:100%;padding:15px;background:linear-gradient(135deg,#667eea,#764ba2);color:#fff;border:none;border-radius:10px;font-size:18px;cursor:pointer;}
-.loading{display:none;text-align:center;padding:20px;background:#f8f9fa;border-radius:10px;margin-top:20px;}
-.spinner{border:4px solid #f3f3f3;border-top:4px solid #667eea;border-radius:50%;width:40px;height:40px;animation:spin 1s linear infinite;margin:auto;}
-@keyframes spin{0%{transform:rotate(0deg);}100%{transform:rotate(360deg);}}
-.result{display:none;margin-top:20px;padding:20px;background:#d4edda;border-radius:10px;text-align:center;}
-.error{display:none;background:#f8d7da;color:#721c24;border-radius:10px;padding:15px;margin-top:20px;}
-@media(max-width:600px){.row{grid-template-columns:1fr;}}
-</style>
-</head>
-<body>
-<div class="container">
-<div class="header"><h1>🎬 تحويل النص إلى فيديو</h1><p>بتقنيات الذكاء الاصطناعي</p></div>
-<div class="content">
-<div class="form-group"><label>📝 النص</label><textarea id="text" rows="4" placeholder="اكتب النص هنا..."></textarea></div>
-<div class="row">
-<div class="form-group"><label>🎨 لون الخلفية</label><select id="bg"><option value="black">أسود</option><option value="white">أبيض</option><option value="navy">أزرق</option></select></div>
-<div class="form-group"><label>✏️ لون النص</label><select id="color"><option value="white">أبيض</option><option value="yellow">أصفر</option></select></div>
-</div>
-<div class="row">
-<div class="form-group"><label>🖼️ الصورة الرمزية</label><select id="avatar"><option value="default">افتراضي</option><option value="none">إخفاء</option></select></div>
-<div class="form-group"><label>🎬 النوع</label><select id="type"><option value="static">نص ثابت</option><option value="synced">متزامن مع الصوت</option></select></div>
-</div>
-<div class="row">
-<div class="form-group"><label>⏱️ المدة (ثواني)</label><input type="number" id="duration" value="5" min="3" max="30"></div>
-<div class="form-group"><label>🔊 صوت</label><select id="tts"><option value="true">نعم</option><option value="false">لا</option></select></div>
-</div>
-<div id="eleven" style="display:none;"><div class="form-group"><label>🎙️ مفتاح ElevenLabs (اختياري)</label><input type="password" id="key" placeholder="API Key"></div></div>
-<button id="generate">🚀 إنشاء الفيديو</button>
-<div class="loading" id="loading"><div class="spinner"></div><p>جاري الإنشاء...</p></div>
-<div class="result" id="result"></div>
-<div class="error" id="error"></div>
-</div></div>
-<script>
-const ttsSel=document.getElementById('tts'); const elevenDiv=document.getElementById('eleven');
-ttsSel.addEventListener('change',()=>{elevenDiv.style.display=ttsSel.value==='true'?'block':'none';});
-document.getElementById('generate').onclick=async()=>{
-const text=document.getElementById('text').value.trim();
-if(!text){showError('أدخل النص');return;}
-const data={
-text:text,bg_color:document.getElementById('bg').value,text_color:document.getElementById('color').value,
-avatar:document.getElementById('avatar').value,video_type:document.getElementById('type').value,
-duration:parseFloat(document.getElementById('duration').value),use_tts:ttsSel.value==='true',
-use_elevenlabs:ttsSel.value==='true' && document.getElementById('key').value!=='',
-elevenlabs_api_key:document.getElementById('key').value||null
-};
-showLoading(true);hideResult();hideError();
-try{
-const res=await fetch('/generate',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(data)});
-const json=await res.json();
-if(json.success){showResult(json.video_url);}else{showError(json.error||'خطأ');}
-}catch(e){showError('خطأ في الاتصال');}
-finally{showLoading(false);}
-};
-function showLoading(s){document.getElementById('loading').style.display=s?'block':'none';document.getElementById('generate').disabled=s;}
-function showResult(url){const div=document.getElementById('result');div.innerHTML=`<p>✅ تم الإنشاء</p><a href="${url}" download>تحميل الفيديو</a><br><video width="100%" controls><source src="${url}" type="video/mp4"></video>`;div.style.display='block';}
-function hideResult(){document.getElementById('result').style.display='none';}
-function showError(msg){const e=document.getElementById('error');e.innerHTML=`❌ ${msg}`;e.style.display='block';}
-function hideError(){document.getElementById('error').style.display='none';}
-</script>
-</body>
-</html>
+لتشغيل المشروع:
+uvicorn main:app --reload --host 0.0.0.0 --port 8000
 """
 
-@app.route('/')
-def index():
-    return render_template_string(HTML)
+import os
+import logging
+from datetime import datetime, timedelta, timezone
+from typing import Optional, List
+import enum
 
-@app.route('/generate', methods=['POST'])
-def generate():
-    data = request.get_json()
-    if not data or not data.get('text'):
-        return jsonify({'error': 'لا يوجد نص'}), 400
+from fastapi import FastAPI, Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from pydantic_settings import BaseSettings
+from sqlalchemy import (
+    create_engine, Column, Integer, String, Float, Enum, DateTime, ForeignKey, Boolean
+)
+from sqlalchemy.sql import func
+from sqlalchemy.ext.declarative import declarative_base
+from sqlalchemy.orm import sessionmaker, Session, relationship
+from jose import JWTError, jwt
+from passlib.context import CryptContext
+from dotenv import load_dotenv
 
-    text = data['text']
-    use_tts = data.get('use_tts', True)
-    use_eleven = data.get('use_elevenlabs', False)
-    key = data.get('elevenlabs_api_key')
-    avatar = None if data.get('avatar') == 'none' else DEFAULT_AVATAR
-    bg = data.get('bg_color', 'black')
-    txtcol = data.get('text_color', 'white')
-    vid_type = data.get('video_type', 'static')
-    duration = float(data.get('duration', 5))
+# ============================================================
+# إعدادات المشروع
+# ============================================================
+load_dotenv()
 
-    vid_id = str(uuid.uuid4())
-    audio_path = os.path.join(OUTPUT_DIR, f'audio_{vid_id}.mp3')
-    video_path = os.path.join(OUTPUT_DIR, f'video_{vid_id}.mp4')
+class Settings(BaseSettings):
+    PROJECT_NAME: str = "ديوان محافظة عدن - المركز السيادي"
+    VERSION: str = "1.0.0"
+    API_V1_STR: str = "/api/v1"
 
+    SECRET_KEY: str = os.getenv("SECRET_KEY", "aden-sovereign-secret-key-change-in-production")
+    ALGORITHM: str = "HS256"
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7
+
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///./sovereign_center.db")
+
+    SOVEREIGN_MOBILE: str = "967770295876"
+
+    class Config:
+        case_sensitive = True
+
+settings = Settings()
+
+# ============================================================
+# قاعدة البيانات
+# ============================================================
+engine = create_engine(
+    settings.DATABASE_URL,
+    connect_args={"check_same_thread": False} if "sqlite" in settings.DATABASE_URL else {}
+)
+SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+Base = declarative_base()
+
+def get_db():
+    db = SessionLocal()
     try:
-        if use_tts:
-            generate_audio(text, audio_path, use_eleven, key)
-            if vid_type == 'synced':
-                create_video_synced(text, audio_path, video_path, avatar, bg, txtcol)
-            else:
-                create_video_simple(text, video_path, duration, avatar, bg, txtcol)
-                # إضافة الصوت للفيديو الثابت
-                vid = VideoClip.from_file(video_path)
-                aud = AudioFileClip(audio_path).with_duration(vid.duration)
-                final = vid.with_audio(aud)
-                final.write_videofile(video_path, codec='libx264', audio_codec='aac')
-        else:
-            create_video_simple(text, video_path, duration, avatar, bg, txtcol)
+        yield db
+    finally:
+        db.close()
 
-        url = url_for('download', filename=os.path.basename(video_path), _external=True)
-        return jsonify({'success': True, 'video_url': url})
-    except Exception as e:
-        print(f"Error: {e}")
-        return jsonify({'error': str(e)}), 500
+# ============================================================
+# نماذج قاعدة البيانات
+# ============================================================
+class UserRole(str, enum.Enum):
+    GOVERNOR = "governor"
+    DISTRICT_MAYOR = "district_mayor"
+    COLLECTOR = "collector"
 
-@app.route('/download/<filename>')
-def download(filename):
-    path = os.path.join(OUTPUT_DIR, filename)
-    if os.path.exists(path):
-        return send_file(path, as_attachment=True)
-    return jsonify({'error': 'ملف غير موجود'}), 404
+class ShopCategory(str, enum.Enum):
+    A = "أ - ممتاز"
+    B = "ب - متوسط"
+    C = "ج - صغير"
 
-# ============================
-# تشغيل الخادم
-# ============================
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    print(f"Starting server on 0.0.0.0:{port}")
-    # استخدام use_reloader=False لتجنب مشاكل المنافذ
-    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+class ShopStatus(str, enum.Enum):
+    ACTIVE = "نشط"
+    INACTIVE = "غير نشط"
+    BLOCKED = "محظور"
+
+class User(Base):
+    __tablename__ = "users"
+    id = Column(Integer, primary_key=True, index=True)
+    phone = Column(String(20), unique=True, index=True, nullable=False)
+    full_name = Column(String(100), nullable=False)
+    hashed_password = Column(String(200), nullable=False)
+    role = Column(Enum(UserRole), default=UserRole.COLLECTOR)
+    district_id = Column(Integer, ForeignKey("districts.id"), nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class District(Base):
+    __tablename__ = "districts"
+    id = Column(Integer, primary_key=True, index=True)
+    code = Column(String(10), unique=True, nullable=False)
+    name = Column(String(100), nullable=False)
+    mayor_name = Column(String(100))
+    mayor_phone = Column(String(20))
+    geo_fence_data = Column(String(500), nullable=True)
+    is_active = Column(Boolean, default=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    shops = relationship("Shop", back_populates="district")
+
+class Shop(Base):
+    __tablename__ = "shops"
+    id = Column(Integer, primary_key=True, index=True)
+    unique_code = Column(String(20), unique=True, index=True, nullable=False)
+    district_id = Column(Integer, ForeignKey("districts.id"), nullable=False)
+
+    commercial_name = Column(String(200), nullable=False)
+    activity_type = Column(String(100), nullable=False)
+    commercial_register = Column(String(50))
+    owner_name = Column(String(100), nullable=False)
+    owner_phone = Column(String(20), nullable=False)
+    owner_email = Column(String(100))
+
+    address_text = Column(String(500))
+    latitude = Column(Float, nullable=False)
+    longitude = Column(Float, nullable=False)
+
+    category = Column(Enum(ShopCategory), default=ShopCategory.B)
+    monthly_fee = Column(Float, default=0.0)
+
+    status = Column(Enum(ShopStatus), default=ShopStatus.ACTIVE)
+    qr_code_data = Column(String(500))
+    ussd_string = Column(String(50))
+
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    district = relationship("District", back_populates="shops")
+
+class Transaction(Base):
+    __tablename__ = "transactions"
+    id = Column(Integer, primary_key=True, index=True)
+    shop_id = Column(Integer, ForeignKey("shops.id"), nullable=False)
+    collector_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    amount = Column(Float, nullable=False)
+    payment_method = Column(String(50))
+    latitude = Column(Float)
+    longitude = Column(Float)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+# ============================================================
+# الأمان والصلاحيات
+# ============================================================
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+class RBAC:
+    ROLES = {
+        "governor": ["read:all", "write:all", "delete:all"],
+        "district_mayor": ["read:district", "write:district"],
+        "collector": ["read:assigned", "write:collection"],
+    }
+
+    @staticmethod
+    def has_permission(user_role: str, required_permission: str) -> bool:
+        return required_permission in RBAC.ROLES.get(user_role, [])
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
+    to_encode = data.copy()
+    if expires_delta:
+        expire = datetime.now(timezone.utc) + expires_delta
+    else:
+        expire = datetime.now(timezone.utc) + timedelta(minutes=15)
+    to_encode.update({"exp": expire})
+    encoded_jwt = jwt.encode(to_encode, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+    return encoded_jwt
+
+def decode_token(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+        return payload
+    except JWTError:
+        return None
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+
+# ============================================================
+# نماذج Pydantic (للتحقق من البيانات)
+# ============================================================
+class UserBase(BaseModel):
+    phone: str
+    full_name: str
+    role: UserRole
+    district_id: Optional[int] = None
+
+class UserCreate(UserBase):
+    password: str
+
+class UserResponse(UserBase):
+    id: int
+    is_active: bool
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class DistrictBase(BaseModel):
+    code: str
+    name: str
+    mayor_name: Optional[str] = None
+    mayor_phone: Optional[str] = None
+
+class DistrictCreate(DistrictBase):
+    pass
+
+class DistrictResponse(DistrictBase):
+    id: int
+    is_active: bool
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+class ShopBase(BaseModel):
+    commercial_name: str
+    activity_type: str
+    commercial_register: Optional[str] = None
+    owner_name: str
+    owner_phone: str
+    owner_email: Optional[str] = None
+    address_text: Optional[str] = None
+    latitude: float
+    longitude: float
+    category: ShopCategory = ShopCategory.B
+    monthly_fee: float
+
+class ShopCreate(ShopBase):
+    district_id: int
+
+class ShopResponse(ShopBase):
+    id: int
+    unique_code: str
+    district_id: int
+    status: ShopStatus
+    qr_code_data: Optional[str] = None
+    ussd_string: Optional[str] = None
+    created_at: datetime
+    class Config:
+        from_attributes = True
+
+class AlertRequest(BaseModel):
+    level: str
+    message: str
+    district_id: Optional[int] = None
+    shop_id: Optional[int] = None
+
+# ============================================================
+# خدمة التنبيهات للرقم السيادي
+# ============================================================
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def send_sovereign_alert(level: str, message: str, district_id: int = None, shop_id: int = None):
+    """محاكاة إرسال تنبيه إلى الرقم السيادي 967770295876"""
+    log_message = (
+        f"🚨 [SOVEREIGN ALERT] Level: {level} | "
+        f"To: {settings.SOVEREIGN_MOBILE} | "
+        f"District: {district_id} | Shop: {shop_id} | "
+        f"Message: {message}"
+    )
+    logger.warning(log_message)
+    return {"status": "logged", "to": settings.SOVEREIGN_MOBILE}
+
+# ============================================================
+# دوال مساعدة
+# ============================================================
+def generate_unique_code(district_code: str, db: Session) -> str:
+    last = db.query(Shop).filter(Shop.unique_code.like(f"{district_code}-%")).order_by(Shop.id.desc()).first()
+    if last:
+        num = int(last.unique_code.split("-")[-1]) + 1
+    else:
+        num = 1
+    return f"{district_code}-{num:04d}"
+
+# ============================================================
+# إنشاء تطبيق FastAPI
+# ============================================================
+app = FastAPI(
+    title=settings.PROJECT_NAME,
+    version=settings.VERSION,
+    description="نظام المركز السيادي لإدارة إيرادات محافظة عدن"
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# ============================================================
+# إنشاء الجداول تلقائياً
+# ============================================================
+Base.metadata.create_all(bind=engine)
+
+# ============================================================
+# نقاط النهاية (API Endpoints)
+# ============================================================
+API_V1 = settings.API_V1_STR
+
+# ---------- المصادقة ----------
+@app.post(f"{API_V1}/auth/register", response_model=UserResponse, tags=["Authentication"])
+def register(user_data: UserCreate, db: Session = Depends(get_db)):
+    existing = db.query(User).filter(User.phone == user_data.phone).first()
+    if existing:
+        raise HTTPException(status_code=400, detail="رقم الهاتف مسجل مسبقاً")
+    hashed = get_password_hash(user_data.password)
+    new_user = User(
+        phone=user_data.phone,
+        full_name=user_data.full_name,
+        hashed_password=hashed,
+        role=user_data.role,
+        district_id=user_data.district_id
+    )
+    db.add(new_user)
+    db.commit()
+    db.refresh(new_user)
+    return new_user
+
+@app.post(f"{API_V1}/auth/login", response_model=Token, tags=["Authentication"])
+def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+    user = db.query(User).filter(User.phone == form_data.username).first()
+    if not user or not verify_password(form_data.password, user.hashed_password):
+        raise HTTPException(status_code=401, detail="رقم الهاتف أو كلمة المرور غير صحيحة")
+    access_token = create_access_token(
+        data={"sub": user.phone, "role": user.role.value, "district_id": user.district_id}
+    )
+    return {"access_token": access_token, "token_type": "bearer"}
+
+# ---------- المديريات ----------
+@app.post(f"{API_V1}/districts/", response_model=DistrictResponse, tags=["Districts"])
+def create_district(district: DistrictCreate, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = decode_token(token)
+    if not payload or not RBAC.has_permission(payload.get("role"), "write:all"):
+        raise HTTPException(status_code=403, detail="غير مصرح")
+    db_district = District(**district.dict())
+    db.add(db_district)
+    db.commit()
+    db.refresh(db_district)
+    return db_district
+
+@app.get(f"{API_V1}/districts/", response_model=List[DistrictResponse], tags=["Districts"])
+def list_districts(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401)
+    return db.query(District).all()
+
+# ---------- المحلات ----------
+@app.post(f"{API_V1}/shops/", response_model=ShopResponse, tags=["Shops"])
+def create_shop(shop: ShopCreate, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401)
+    role = payload.get("role")
+    user_district = payload.get("district_id")
+    if not (RBAC.has_permission(role, "write:all") or (RBAC.has_permission(role, "write:district") and user_district == shop.district_id)):
+        raise HTTPException(status_code=403, detail="غير مصرح")
+
+    district = db.query(District).filter(District.id == shop.district_id).first()
+    if not district:
+        raise HTTPException(status_code=404, detail="المديرية غير موجودة")
+
+    unique_code = generate_unique_code(district.code, db)
+    ussd = f"*159*{unique_code.split('-')[-1]}#"
+    qr_data = f"ADEN:SHOP:{unique_code}"
+
+    new_shop = Shop(
+        **shop.dict(),
+        unique_code=unique_code,
+        qr_code_data=qr_data,
+        ussd_string=ussd
+    )
+    db.add(new_shop)
+    db.commit()
+    db.refresh(new_shop)
+    return new_shop
+
+@app.get(f"{API_V1}/shops/", response_model=List[ShopResponse], tags=["Shops"])
+def list_shops(district_id: int = None, token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401)
+    query = db.query(Shop)
+    if district_id:
+        query = query.filter(Shop.district_id == district_id)
+    return query.all()
+
+# ---------- التقارير والتنبيهات ----------
+@app.post(f"{API_V1}/alerts/test", tags=["Reports & Alerts"])
+def test_alert(alert: AlertRequest, token: str = Depends(oauth2_scheme)):
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401)
+    send_sovereign_alert(alert.level, alert.message, alert.district_id, alert.shop_id)
+    return {"status": "alert sent", "to": settings.SOVEREIGN_MOBILE}
+
+@app.get(f"{API_V1}/reports/daily-summary", tags=["Reports & Alerts"])
+def daily_summary(token: str = Depends(oauth2_scheme), db: Session = Depends(get_db)):
+    payload = decode_token(token)
+    if not payload:
+        raise HTTPException(status_code=401)
+    districts = db.query(District).all()
+    summary = []
+    for d in districts:
+        shops_count = db.query(Shop).filter(Shop.district_id == d.id).count()
+        summary.append({"district": d.name, "shops": shops_count})
+    return {"date": datetime.now().strftime("%Y-%m-%d"), "districts": summary, "sovereign_mobile": settings.SOVEREIGN_MOBILE}
+
+# ---------- الصفحة الرئيسية والفحص ----------
+@app.get("/")
+def root():
+    return {
+        "message": "مرحباً بك في نظام المركز السيادي - ديوان محافظة عدن",
+        "docs": "/docs",
+        "sovereign_mobile": settings.SOVEREIGN_MOBILE
+    }
+
+@app.get("/health")
+def health():
+    return {"status": "healthy"}
+
+# ============================================================
+# تشغيل التطبيق مباشرة (للتجربة المحلية)
+# ============================================================
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
