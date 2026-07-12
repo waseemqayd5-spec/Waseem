@@ -1,0 +1,6 @@
+*.Wpr
+*wpu
+.DS_Store
+Rhistory
+*.trk
+*Epx
